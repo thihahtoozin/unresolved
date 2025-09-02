@@ -50,7 +50,12 @@ void read_request(const char *buffer, client_t *client){
     dns_header_t *header = &req->header;
     dns_query_t *query = &req->query;
 
-    header->trans_id = (buffer[0] << 8) | buffer[1];
+    header->trans_id = ((unsigned char) buffer[0] << 8) | (unsigned char) buffer[1];
+    uint16_t x = (buffer[0] << 8) | buffer[1];
+    printf("header->trans_id : %d\n", header->trans_id);
+    printf("x : %d\n", x);
+    printf("buffer[0] : %d\n", buffer[0]);
+    printf("buffer[1] : %d\n", buffer[1]);
     header->flags = (buffer[2] << 8) | buffer[3];
     header->qd_count = (buffer[4] << 8) | buffer[5];   // Number of Questions
     header->an_count = (buffer[6] << 8) | buffer[7];   // Number of Answer Records
@@ -79,6 +84,7 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
     /* Response Header Section */
     dns_header_t rep_header = {0};
     rep_header.trans_id = req->header.trans_id;       // Transaction ID
+    printf("req->header.trans_id : %d\n", req->header.trans_id);
     uint16_t req_opcode = (req->header.flags >> 11) & MASK_4BITS; // Extract Opcode from the request header
     uint16_t req_rd = (req->header.flags >> 8) & MASK_1BIT;       // Extract Recursion Desired from the request header
     
@@ -128,7 +134,7 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
         printf(query_t_str);
         printf("\n");
         if((strncmp(zone.records[i].name, query->question, strlen(query->question)) == 0) && (strcmp(zone.records[i].type, query_t_str) == 0)){ 
-            printf("rec found\n");
+            printf("[ rec found ]\t %s %s\n", query->question, query_t_str);
             rep_header.an_count++;
 
             ans->name_ptr = 0xc00c;                        // (3 << 14) | 12;       // do manually for now c0 0c
@@ -142,11 +148,13 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
             if(strncmp(query_t_str, "NS", 2) == 0){
                 rep_header.ns_count++;
             }
+            break;
         } 
     }
 
     /* Write header to the response packet */
     // memcpy(rep_p, &rep_header, 12);
+    printf("rep_header.trans_id : %d\n", rep_header.trans_id);
     rep_p[0] = (rep_header.trans_id >> 8) & MASK_8BITS;  // Transaction ID [MSB]
     rep_p[1] = rep_header.trans_id & MASK_8BITS;         //                [LSB]
     rep_p[2] = (rep_header.flags >> 8) & MASK_8BITS;     // Flags          [MSB]
