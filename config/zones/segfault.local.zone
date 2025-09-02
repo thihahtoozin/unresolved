@@ -1,0 +1,14 @@
+$TTL 86400 ;
+$ORIGIN segfault.local. ;
+@   IN  SOA     ns1.segfault.local. hostmaster.segfault.local. (
+            2024111401   ; Serial
+            3600         ; Refresh
+            1800         ; Retry
+            1209600      ; Expire
+            86400 )      ; Minimum TTL
+@   IN  NS      ns1.segfault.local.
+@   IN  A       172.20.10.14
+ns1 IN  A       172.20.10.14 ; Replace with your server IP
+ssh IN	A	    172.20.10.14 ; SSH Server
+www IN  A       172.20.10.14 ; Example entry for a website host
+

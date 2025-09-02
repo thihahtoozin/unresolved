@@ -1,0 +1,108 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <string.h>
+#include <arpa/inet.h>
+
+#include "client.h"
+#include "dns.h"
+#include "zoneloader.h"
+#include "handle_dns.h"
+
+#define BUFFER_SIZE 1232
+
+int main(int argc, char **argv){
+    // Resolving arguments
+    if(argc != 3){
+        fprintf(stderr, "Usage:\n\t%s <ip> <port>\n", argv[0]);
+        return EXIT_SUCCESS;
+    }
+    const char *serv_ip = argv[1];
+    unsigned short serv_port = atoi(argv[2]);
+
+    // Creating server socket
+    int serv_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if(serv_sock == -1){
+        perror("Failed to create server socket");
+        exit(EXIT_FAILURE);
+    }
+
+    // Setting socket option
+    int opt = 1;
+    if (setsockopt(serv_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt(SO_REUSEADDR) failed");
+        exit(EXIT_FAILURE);
+    }
+ 
+    // Create Address Structure for server
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(serv_port);
+    inet_pton(AF_INET, serv_ip, &serv_addr.sin_addr);
+
+    if(bind(serv_sock, (const struct sockaddr *) &serv_addr, (socklen_t) sizeof(serv_addr)) < 0){
+        perror("bind() failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Load zone file
+    zone_t zone;
+    parse_zone_file("config/zones/segfault.local.zone", &zone);
+
+    // Display TTL and Origin
+    printf("zone.ttl\t%u\n", zone.ttl);
+    printf("zone.origin\t%s\n", zone.origin);
+
+    // Display SOA
+    printf("SOA Rrecord\n");
+    printf("MNAME   : %s\n", zone.soa.mname);
+    printf("RNAME   : %s\n", zone.soa.rname); 
+    printf("Serial  : %u\n", zone.soa.serial);
+    printf("Refresh : %u\n", zone.soa.refresh);
+    printf("Retry   : %u\n", zone.soa.retry);
+    printf("Expire  : %u\n", zone.soa.expire);
+    printf("Min TTL : %u\n", zone.soa.min_ttl);
+
+    // Display records
+    printf("Records\n");
+    for(size_t i = 0; i < zone.n_records; i++){
+        printf("%s\t%s\t%s\t%s\n", zone.records[i].name, zone.records[i].rec_class, zone.records[i].type, zone.records[i].value);
+    }
+
+    while(1){
+        char buffer[BUFFER_SIZE];
+        client_t client;
+
+        socklen_t addr_len = sizeof(client.addr);
+        ssize_t bytes_recv = recvfrom(serv_sock, buffer, sizeof(buffer), 0, (struct sockaddr *) &client.addr, &addr_len);
+        if(bytes_recv < 0){
+            perror("recvfrom()");
+            close(serv_sock);
+            exit(EXIT_FAILURE);
+        }
+
+        read_request(buffer, &client);
+        write_response(buffer, serv_sock, &client, zone, addr_len);
+    }
+
+    close(serv_sock);
+
+    return EXIT_SUCCESS;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
