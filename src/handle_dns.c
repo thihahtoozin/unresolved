@@ -10,7 +10,7 @@
 #include "client.h"
 #include "zoneloader.h"
 
-ssize_t format_fqdn(const char *domain, void **addr){
+ssize_t encode_fqdn(const char *domain, void **addr){
     /* This function split the `www.example.com.` into
      * 03 77 77 77 07 65 78 61 6d 70 6c 65 03 63 6f 6d 00
      * (03 w w w 07 e x a m p l e 03 c o m 00)
@@ -115,8 +115,8 @@ void read_request(const char *buffer, client_t *client){
     // query->question
 }
 
-// this updates an_count, ns_count, ar_count, rdlength
-static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep_p, int *rep_len){
+/* These funcitons return the amount of bytes written */
+static int write_header(uint8_t *rep_p, dns_t *req, uint16_t an_count, uint16_t ns_count, uint16_t ar_count){
 
     /* Response Header Section */
     dns_header_t rep_header = {0};
@@ -134,74 +134,9 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
     rep_header.flags |= (0);                          // RCODE = 0 (No error)
     // Counts
     rep_header.qd_count = req->header.qd_count;
-    rep_header.an_count = 0;                          // INITIALIZED TO ZERO
-    rep_header.ns_count = 0;                          // INITIALIZED TO ZERO
-    rep_header.ar_count = 0;                          // INITIALIZED TO ZERO
-
-    /* Answer Section */
-    dns_rr_t *ans = malloc(sizeof(dns_rr_t));
-
-    ans->ttl = zone.ttl;                              // Time To Live in seconds
-    dns_query_t *query = &req->query;
-
-    const char *query_t_str;
-    switch(query->qtype){
-        case 1:
-            query_t_str = "A";
-            break;
-        case 5:
-            query_t_str = "CNAME";
-            break;
-        default:
-            query_t_str = "UNKNOWN";
-            break;
-    }
-
-    // Loop through records in zone_t
-    for(int i = 0; i < zone.n_records; i++){
-        // Find the matched question with the matched type
-        if((strncmp(zone.records[i].name, query->question, strlen(query->question)) == 0) && (strcmp(zone.records[i].type, query_t_str) == 0)){ 
-            printf("[ Record Found ]\t %s %s\n", query->question, query_t_str);
-            rep_header.an_count++;
-
-            // AAAA (TYPE - 28)
-            // A Record
-            if(strncmp(query_t_str, "A", 1) == 0){
-                printf("A Record\n");
-                ans->type = 1;                                 // A
-                ans->class_ = 1;                               // IN
-                ans->rdlength = 0x04;                          // IPv4 addresses takes only 4 bytes
-                strcpy(ans->rdata, zone.records[i].value);
-
-                break;
-            }
-
-            // NS Record [ NOT DONE YET ]
-            if(strncmp(query_t_str, "NS", 2) == 0){
-                printf("NS Record\n");
-                ans->type = 2;                                 // NS
-                ans->class_ = 1;                               // IN
-                rep_header.ns_count++;
-                ans->rdlength = strlen(zone.records[i].value);
-                strcpy(ans->rdata, zone.records[i].value);     // make it [count][label][count][label]... [ <= START HERE   ] 
-
-                break;
-            }
-
-            // CNAME Record [ NOT DONE YET ]
-            if(strncmp(query_t_str, "CNAME", 5) == 0){
-                printf("NS Record\n");
-                ans->type = 5;                                 // CNAME
-                ans->class_ = 1;                               // IN
-                //rep_header.ns_count++;
-
-                break;
-            }
-            // SOA  (TYPE - 6)
-            // PTR  (TYPE - 12)
-
-        } 
-    }
+    rep_header.an_count = an_count;                   // INITIALIZED TO ZERO
+    rep_header.ns_count = ns_count;                   // INITIALIZED TO ZERO
+    rep_header.ar_count = ar_count;                   // INITIALIZED TO ZERO
 
     /* Write header to the response packet */
     int header_len = 0;
@@ -219,26 +154,34 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
     rep_p[header_len++] = (rep_header.ar_count >> 8) & MASK_8BITS;  // AR Count       [MSB]
     rep_p[header_len++] = rep_header.ar_count & MASK_8BITS;         //                [LSB]
 
-    *rep_len = header_len;                       // 12
-    // for the case where there is anything between header and question
-    int q_offset = *rep_len;                     // 12
+    return header_len; // 12 bytes
+};
+
+static int write_question(uint8_t *rep_p, const char *buffer, dns_query_t *query, int q_offset){
+
+    // int q_offset = *rep_len;                  // 12
+    size_t q_pos = q_offset;
+
+    // ans->name_ptr = (3 << 14) | q_offset;        // 0xc00c; if the q_offset is 12
+
+    int q_end_pos = parse_question(buffer, q_offset, query);
+    memcpy(rep_p + q_offset, buffer + q_offset, q_end_pos-q_offset-4-1); // domain -4 for qtype and qclass -1 for null byte
+    q_pos += q_end_pos - q_offset - 4 - 1;
+    
+    rep_p[q_pos++] = 0;
+    rep_p[q_pos++] = (query->qtype >> 8) & MASK_8BITS;
+    rep_p[q_pos++] = query->qtype & MASK_8BITS;
+
+    rep_p[q_pos++] = (query->qclass >> 8) & MASK_8BITS;
+    rep_p[q_pos++] = query->qclass & MASK_8BITS;
+
+    return q_pos;
+}
+
+static int write_answer(uint8_t *rep_p, dns_rr_t *ans, dns_rr_t *add_ans, int q_offset, int ans_offset, ssize_t encoded_domain_len){
+    size_t pos = ans_offset;
     ans->name_ptr = (3 << 14) | q_offset;        // 0xc00c; if the q_offset is 12
 
-    /* Write the Question back to the response packet */
-    int q_end_pos = parse_question(buffer, q_offset, query);
-    memcpy(rep_p + *rep_len, buffer + 12, q_end_pos-q_offset-4-1); // domain -4 for qtype and qclass -1 for null byte
-    *rep_len += q_end_pos-header_len-4-1;
-
-    size_t pos = *rep_len;
-    
-    rep_p[pos++] = 0;
-    rep_p[pos++] = (query->qtype >> 8) & MASK_8BITS;
-    rep_p[pos++] = query->qtype & MASK_8BITS;
-
-    rep_p[pos++] = (query->qclass >> 8) & MASK_8BITS;
-    rep_p[pos++] = query->qclass & MASK_8BITS;
-
-    /* Write the Answer Section */
     // printf("%d\n", ans->name_ptr);
     rep_p[pos++] = (ans->name_ptr >> 8) & MASK_8BITS;    // Name           [MSB]
     rep_p[pos++] = ans->name_ptr & MASK_8BITS;           //                [LSB]
@@ -252,18 +195,165 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
     rep_p[pos++] = ans->ttl & MASK_8BITS;                //                [LSB]
     rep_p[pos++] = (ans->rdlength >> 8) & MASK_8BITS;    // RDLENGTH       [MSB]
     rep_p[pos++] = ans->rdlength & MASK_8BITS;           //                [LSB]
-    if(ans->type && 0x1){
+    //printf("ANS_T %hu\n", ans->type);
+    if(ans->type == 1){
         /* A */
+        printf("A 0x1\n");
         inet_pton(AF_INET, ans->rdata, rep_p+pos);
-    }else if(ans->type && 0x2){
+        pos += 4;       // 32 bit IPv4 address
+    }else if(ans->type == 2){
+        /* NS */
+        printf("NS 0x2\n");
+        memcpy(rep_p+pos, ans->rdata, encoded_domain_len);
+        pos += encoded_domain_len - 1; // -1 for removing one of the 2 null bytes
+    }else if(ans->type == 5){
         /* CNAME */
-        memcpy(rep_p+pos, ans->rdata, strlen(ans->rdata)+1);
+        printf("CNAME 0x5\n");
+        memcpy(rep_p+pos, ans->rdata, encoded_domain_len);
+        pos += encoded_domain_len - 1; // -1 for removing one of the 2 null bytes
+
+        printf("Additional A 0x1\n");
+        inet_pton(AF_INET, add_ans->rdata, rep_p+pos);
+        pos += 4;       // 32 bit IPv4 address
+
     }
-    pos += 4; //strlen(ans->rdata);
-    *rep_len = pos;
+    // *rep_len = pos;
+    return pos;
+}
+
+// this updates an_count, ns_count, ar_count, rdlength
+static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep_p, int *rep_len){
+
+    /* Answer Section */
+    dns_rr_t *ans = malloc(sizeof(dns_rr_t));
+    dns_rr_t *add_ans = malloc(sizeof(dns_rr_t));
+
+    ans->ttl = zone.ttl;                              // Time To Live in seconds
+    dns_query_t *query = &req->query;
+
+    /* Find Match */
+    const char *query_t_str;
+    ssize_t encoded_domain_len;
+    switch(query->qtype){
+        case 1:
+            query_t_str = "A";
+            break;
+        case 2:
+            query_t_str = "NS";
+            break;
+        case 5:
+            query_t_str = "CNAME";
+            break;
+        default:
+            query_t_str = "UNKNOWN";
+            break;
+    }
+    printf("QUERY_T_STR : %s\n", query_t_str);
+
+    uint16_t an_count = 0;
+    uint16_t ns_count = 0;
+    uint16_t ar_count = 0;
+
+    // Loop through records in zone_t
+    for(int i = 0; i < zone.n_records; i++){
+        // Find the matched question with the matched type
+        if((strncmp(zone.records[i].name, query->question, strlen(query->question)) == 0) && (strcmp(zone.records[i].type, query_t_str) == 0)){ 
+            printf("[ Record Found ]\t %s %s\n", query->question, query_t_str);
+            an_count++;
+
+            // AAAA (TYPE - 28)
+            // A Record
+            if(strncmp(query_t_str, "A", 1) == 0){
+                printf("A Record\n");
+                ans->type = 1;                                 // A
+                ans->class_ = 1;                               // IN
+                ans->rdlength = 0x04;                          // IPv4 addresses takes only 4 bytes
+                strcpy(ans->rdata, zone.records[i].value);
+
+                break;
+            }
+
+            // NS Record [ NOT DONE YET ]
+            if(strncmp(query_t_str, "NS", 2) == 0){
+                printf("NS Record\n");
+
+                /* Header */
+                //rep_header.ns_count++;                       // I'm still uncertain about when to turn this on.
+
+                /* Answer */
+                ans->type = 2;                                 // NS
+                ans->class_ = 1;                               // IN
+                ans->rdlength = strlen(zone.records[i].value) + 1;
+
+                void *addr = NULL;                                                               // Address of the encoded bytes
+                encoded_domain_len = encode_fqdn(zone.records[i].value, &addr);                  // Encode domain into [count][label]...
+                memcpy(ans->rdata, addr, encoded_domain_len);
+                free(addr);
+
+                break;
+            }
+
+            // CNAME Record [ NOT DONE YET ]
+            if(strncmp(query_t_str, "CNAME", 5) == 0){
+                printf("CNAME Record\n");
+
+                /* Header */
+                ar_count++;                                    // Append one A record as Additional RR
+                //ns_count++;                                  // I'm still uncertain about when to turn this on.
+
+                /* Answer */
+                ans->type = 5;                                 // CNAME
+                ans->class_ = 1;                               // IN
+                ans->rdlength = strlen(zone.records[i].value) + 1;
+
+                void *addr = NULL;                                                               // Address of the encoded bytes
+                encoded_domain_len = encode_fqdn(zone.records[i].value, &addr);                  // Encode domain into [count][label]...
+                memcpy(ans->rdata, addr, encoded_domain_len);
+                free(addr);
+
+                /* Additional RR for A Record */
+                // dns_rr_t *add_ans = malloc(sizeof(dns_rr_t));
+                printf("Additional A Record\n");
+                add_ans->type = 1;                                 // A
+                add_ans->class_ = 1;                               // IN
+                add_ans->rdlength = 0x04;                          // IPv4 addresses takes only 4 bytes
+
+                // Search of A records
+                for(int j = 0; j < zone.n_records; j++){
+                    if(strncmp(zone.records[j].type, "A", 1) == 0){
+                        printf("------------------\n");
+                        printf("IP ADDR : %s\n", zone.records[j].value);
+                        strcpy(add_ans->rdata, zone.records[j].value);
+                        printf("ADD AND : %s\n", add_ans->rdata);
+                        break;
+                    }
+                }
+
+                break;
+            }
+            // SOA  (TYPE - 6)
+            // PTR  (TYPE - 12)
+
+        } 
+    }
+    /* Write to Header */
+    int header_len = write_header(rep_p, req, an_count, ns_count, ar_count);
+    *rep_len = header_len;
+
+    /* 
+     * for any case where there is anything between header and question
+     */
+
+    /* Write the Question back to the response packet */
+    int q_offset = *rep_len;   // 12
+    *rep_len = write_question(rep_p, buffer, query, q_offset);
+
+    /* Write the Answer Section */
+    *rep_len = write_answer(rep_p, ans, add_ans, q_offset, *rep_len, encoded_domain_len);
 
     /* Free Memories */
     free(ans);
+    free(add_ans);
 }
 
 void write_response(const char *buffer, int serv_sock, client_t *client, zone_t zone, socklen_t addr_len){

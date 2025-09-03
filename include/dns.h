@@ -53,7 +53,7 @@ typedef struct{
 
     /* RDATA */
     uint16_t rdlength;           // Length of RDATA
-    char rdata[DNS_MAX_RDATA];// Variable length accouding to rdlength
+    char rdata[DNS_MAX_RDATA];   // Variable length accouding to rdlength
 }dns_rr_t;
 
 /* DNS Packet */

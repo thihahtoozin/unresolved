@@ -8,9 +8,7 @@ $ORIGIN segfault.local. ;
             86400 )      ; Minimum TTL
 @   IN  NS      ns1.segfault.local.
 @   IN  A       172.20.10.14
-
-ns1 IN  A       172.20.10.14      ; Replace with your server IP
-ssh IN	A	    172.20.10.14      ; SSH Server
-
-www IN  CNAME   segfault.local.   ; www is an alias of the root domain
+ns1 IN  A       172.20.10.14 ; Replace with your server IP
+ssh IN	A	    172.20.10.14 ; SSH Server
+www IN  A       172.20.10.14 ; Example entry for a website host
 
