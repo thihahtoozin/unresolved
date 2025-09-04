@@ -56,7 +56,7 @@ int parse_question(const char *buffer, int offset, dns_query_t *query){
     unsigned int question_len = 0;
     unsigned int query_i = 0;
     while(buffer[pos] != '\0'){
-        int label_len = buffer[pos++];
+        int label_len = (unsigned char) buffer[pos++];
         if(label_len == 0) break;
 
         question_len += label_len;
@@ -210,13 +210,13 @@ static int write_answer(uint8_t *rep_p, dns_rr_t *ans, dns_rr_t *add_ans, int q_
         /* CNAME */
         printf("CNAME 0x5\n");
         memcpy(rep_p+pos, ans->rdata, encoded_domain_len);
-        pos += encoded_domain_len - 1; // -1 for removing one of the 2 null bytes
+        // pos += encoded_domain_len - 1; // -1 for removing one of the 2 null bytes
+        pos += ans->rdlength; // -1 for removing one of the 2 null bytes
 
         /* A as Additional */
         printf("Additional A 0x1\n");
-        add_ans->name_ptr = (3 << 14) | q_offset;        // 0xc00c; if the q_offset is 12
-        rep_p[pos++] = (add_ans->name_ptr >> 8) & MASK_8BITS;    // Name           [MSB]
-        rep_p[pos++] = add_ans->name_ptr & MASK_8BITS;           //                [LSB]
+        memcpy(rep_p + pos, ans->rdata, ans->rdlength);
+        pos += ans->rdlength;
         rep_p[pos++] = (add_ans->type >> 8) & MASK_8BITS;        // Type           [MSB]
         rep_p[pos++] = add_ans->type & MASK_8BITS;               //                [LSB]
         rep_p[pos++] = (add_ans->class_ >> 8) & MASK_8BITS;      // Class          [MSB]
@@ -236,14 +236,14 @@ static int write_answer(uint8_t *rep_p, dns_rr_t *ans, dns_rr_t *add_ans, int q_
     return pos;
 }
 
-static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep_p, int *rep_len){
+static int find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep_p, int *rep_len){
 
     /* Answer Section */
-    dns_rr_t *ans = malloc(sizeof(dns_rr_t));
-    dns_rr_t *add_ans = malloc(sizeof(dns_rr_t));
+    dns_rr_t *ans = malloc(sizeof(dns_rr_t));         // Answer RR
+    dns_rr_t *add_ans = malloc(sizeof(dns_rr_t));     // Additional RR
 
-    ans->ttl = zone.ttl;                              // Time To Live in seconds
-    add_ans->ttl = zone.ttl;                          // Time To Live in seconds
+    ans->ttl = zone.ttl;                              // Time To Live in seconds for AN
+    add_ans->ttl = zone.ttl;                          // Time To Live in seconds for AR
     dns_query_t *query = &req->query;
 
     /* Find Match */
@@ -270,11 +270,12 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
     uint16_t ar_count = 0;
 
     // Loop through records in zone_t
+    int rec_found = 0;
     for(int i = 0; i < zone.n_records; i++){
         // Find the matched question with the matched type
         // if((strncmp(zone.records[i].name, query->question, strlen(query->question)) == 0) && (strcmp(zone.records[i].type, query_t_str) == 0))
         if((strncmp(zone.records[i].name, query->question, strlen(query->question)) == 0)){ 
-            printf("[ Record Found ]\t %s %s\n", query->question, query_t_str);
+            // printf("[ Record Found ]\t %s %s\n", query->question, query_t_str);
             an_count++;
 
             // AAAA (TYPE - 28)
@@ -286,10 +287,11 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
                 ans->rdlength = 0x04;                          // IPv4 addresses takes only 4 bytes
                 strcpy(ans->rdata, zone.records[i].value);
 
+                rec_found = 1;
                 break;
             }
 
-            // NS Record [ NOT DONE YET ]
+            // NS Record
             if(strncmp(zone.records[i].type, "NS", 2) == 0){
                 printf("NS Record\n");
 
@@ -299,17 +301,18 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
                 /* Answer */
                 ans->type = 2;                                 // NS
                 ans->class_ = 1;                               // IN
-                ans->rdlength = strlen(zone.records[i].value) + 1;
 
                 void *addr = NULL;                                                               // Address of the encoded bytes
                 encoded_domain_len = encode_fqdn(zone.records[i].value, &addr);                  // Encode domain into [count][label]...
                 memcpy(ans->rdata, addr, encoded_domain_len);
                 free(addr);
+                ans->rdlength = encoded_domain_len;
 
+                rec_found = 1;
                 break;
             }
 
-            // CNAME Record [ NOT DONE YET ]
+            // CNAME Record
             if(strncmp(zone.records[i].type, "CNAME", 5) == 0){
                 printf("CNAME Record\n");
 
@@ -320,12 +323,12 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
                 /* Answer */
                 ans->type = 5;                                 // CNAME
                 ans->class_ = 1;                               // IN
-                ans->rdlength = strlen(zone.records[i].value) + 1;
 
                 void *addr = NULL;                                                               // Address of the encoded bytes
                 encoded_domain_len = encode_fqdn(zone.records[i].value, &addr);                  // Encode domain into [count][label]...
                 memcpy(ans->rdata, addr, encoded_domain_len);
                 free(addr);
+                ans->rdlength = encoded_domain_len-1;
 
                 /* Additional RR for A Record */
                 // dns_rr_t *add_ans = malloc(sizeof(dns_rr_t));
@@ -345,6 +348,7 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
                     }
                 }
 
+                rec_found = 1;
                 break;
             }
             // SOA  (TYPE - 6)
@@ -352,6 +356,7 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
 
         } 
     }
+    if(rec_found == 0) return -1;
 
     /* Write the Header Section */
     int header_len = write_header(rep_p, req, an_count, ns_count, ar_count);
@@ -371,6 +376,7 @@ static void find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep
     /* Free Memories */
     free(ans);
     free(add_ans);
+    return 0;
 }
 
 void write_response(const char *buffer, int serv_sock, client_t *client, zone_t zone, socklen_t addr_len){
