@@ -248,7 +248,7 @@ static int find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep_
 
     /* Find Match */
     const char *query_t_str;
-    ssize_t encoded_domain_len;
+    ssize_t encoded_domain_len = 0;
     switch(query->qtype){
         case 1:
             query_t_str = "A";
@@ -306,7 +306,7 @@ static int find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep_
                 encoded_domain_len = encode_fqdn(zone.records[i].value, &addr);                  // Encode domain into [count][label]...
                 memcpy(ans->rdata, addr, encoded_domain_len);
                 free(addr);
-                ans->rdlength = encoded_domain_len;
+                ans->rdlength = encoded_domain_len-1;
 
                 rec_found = 1;
                 break;
