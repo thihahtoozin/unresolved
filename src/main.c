@@ -20,6 +20,8 @@ int main(int argc, char **argv){
     }
     const char *serv_ip = argv[1];
     unsigned short serv_port = atoi(argv[2]);
+    const char *ext_serv_ip = "8.8.8.8";
+    unsigned short ext_serv_port = 53;
 
     // Creating server socket
     int serv_sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -35,7 +37,7 @@ int main(int argc, char **argv){
         exit(EXIT_FAILURE);
     }
  
-    // Create Address Structure for server
+    // Create the Address Structure for server
     struct sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
@@ -46,6 +48,13 @@ int main(int argc, char **argv){
         perror("bind() failed");
         exit(EXIT_FAILURE);
     }
+
+    // Create the Address Structure for external server
+    struct sockaddr_in ext_serv_addr;
+    memset(&ext_serv_addr, 0, sizeof(ext_serv_addr));
+    ext_serv_addr.sin_family = AF_INET;
+    ext_serv_addr.sin_port = htons(ext_serv_port);
+    inet_pton(AF_INET, ext_serv_ip, &ext_serv_addr.sin_addr);
 
     // Load zone file
     zone_t zone;
@@ -84,7 +93,7 @@ int main(int argc, char **argv){
         }
 
         read_request(buffer, &client);
-        write_response(buffer, serv_sock, &client, zone, addr_len);
+        write_response(buffer, bytes_recv, serv_sock, &client, zone, addr_len, ext_serv_addr);
     }
 
     close(serv_sock);
