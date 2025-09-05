@@ -49,6 +49,9 @@ int main(int argc, char **argv){
         exit(EXIT_FAILURE);
     }
 
+    // Creating the socket of making upstream request
+    int upstream_sock = socket(AF_INET, SOCK_DGRAM, 0);
+
     // Create the Address Structure for external server
     struct sockaddr_in ext_serv_addr;
     memset(&ext_serv_addr, 0, sizeof(ext_serv_addr));
@@ -85,7 +88,7 @@ int main(int argc, char **argv){
         client_t client;
 
         socklen_t addr_len = sizeof(client.addr);
-        ssize_t bytes_recv = recvfrom(serv_sock, buffer, sizeof(buffer), 0, (struct sockaddr *) &client.addr, &addr_len);
+        ssize_t bytes_recv = recvfrom(serv_sock, buffer, sizeof(buffer), 0, (struct sockaddr *) &client.addr, &addr_len); // <= START HERE
         if(bytes_recv < 0){
             perror("recvfrom()");
             close(serv_sock);
@@ -93,7 +96,7 @@ int main(int argc, char **argv){
         }
 
         read_request(buffer, &client);
-        write_response(buffer, bytes_recv, serv_sock, &client, zone, addr_len, ext_serv_addr);
+        write_response(buffer, bytes_recv, serv_sock, upstream_sock, &client, zone, addr_len, ext_serv_addr);
     }
 
     close(serv_sock);

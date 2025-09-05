@@ -51,16 +51,22 @@ ssize_t encode_fqdn(const char *domain, void **addr){
     return pos;
 }
 
-static void forward_query(const char *buffer, ssize_t bytes_recv, int serv_sock, struct sockaddr_in ext_serv_addr){
+static void forward_query(const char *buffer, ssize_t bytes_recv, client_t *client, int serv_sock, int upstream_sock, struct sockaddr_in ext_serv_addr){
+
+    uint8_t upstream_rep_p[512]; // Upstream Request Packet
+    struct sockaddr_in rep_addr;
+    socklen_t rep_addr_len = sizeof(rep_addr);
+
     // send request to the external DNS server
 
-    printf("INSIDE FORWARD QUERY\n");
     socklen_t ext_addr_len = sizeof(ext_serv_addr);
-    sendto(serv_sock, buffer, bytes_recv, 0, (struct sockaddr *) &ext_serv_addr, ext_addr_len);
-    printf("FORWARD QUERY DONE\n");
+    sendto(upstream_sock, buffer, bytes_recv, 0, (struct sockaddr *) &ext_serv_addr, ext_addr_len);
+
+    ssize_t ret_bytes = recvfrom(upstream_sock, upstream_rep_p, sizeof(upstream_rep_p), 0, (struct sockaddr *) &rep_addr, &rep_addr_len);
 
     // relay the response back to the client
-    // sendto(serv_sock, rep_p, rep_len, 0, (struct sockaddr *) &client->addr, addr_len);
+    socklen_t cli_addr_len = sizeof(client->addr);
+    sendto(serv_sock, upstream_rep_p, ret_bytes, 0, (struct sockaddr *) &client->addr, cli_addr_len);
 }
 
 int parse_question(const char *buffer, int offset, dns_query_t *query){
@@ -391,9 +397,10 @@ static int find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep_
     return 0;
 }
 
-void write_response(const char *buffer, ssize_t bytes_recv, int serv_sock, client_t *client, zone_t zone, socklen_t addr_len, struct sockaddr_in ext_serv_addr){
+void write_response(const char *buffer, ssize_t bytes_recv, int serv_sock, int upstream_sock, client_t *client, zone_t zone, socklen_t addr_len, struct sockaddr_in ext_serv_addr){
 
-    uint8_t rep_p[512]; // Response Packet
+    uint8_t rep_p[512];          // Response Packet
+    uint8_t upstream_req_p[512]; // Upstream Request Packet
     int rep_len;
     int found;
 
@@ -401,7 +408,7 @@ void write_response(const char *buffer, ssize_t bytes_recv, int serv_sock, clien
     found = find_match(buffer, req, zone, rep_p, &rep_len);
 
     if(found == -1){
-        forward_query(buffer, bytes_recv, serv_sock, ext_serv_addr);
+        forward_query(buffer, bytes_recv, client, serv_sock, upstream_sock, ext_serv_addr);
     }else{
         sendto(serv_sock, rep_p, rep_len, 0, (struct sockaddr *) &client->addr, addr_len);
     }
