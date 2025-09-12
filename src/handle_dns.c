@@ -54,14 +54,15 @@ ssize_t encode_fqdn(const char *domain, void **addr){
 static void forward_query(const char *buffer, ssize_t bytes_recv, client_t *client, int serv_sock, int upstream_sock, struct sockaddr_in ext_serv_addr){
 
     uint8_t upstream_rep_p[512]; // Upstream Request Packet
+
     struct sockaddr_in rep_addr;
     socklen_t rep_addr_len = sizeof(rep_addr);
 
     // send request to the external DNS server
-
     socklen_t ext_addr_len = sizeof(ext_serv_addr);
     sendto(upstream_sock, buffer, bytes_recv, 0, (struct sockaddr *) &ext_serv_addr, ext_addr_len);
 
+    // receive the response from the external server
     ssize_t ret_bytes = recvfrom(upstream_sock, upstream_rep_p, sizeof(upstream_rep_p), 0, (struct sockaddr *) &rep_addr, &rep_addr_len);
 
     // relay the response back to the client
