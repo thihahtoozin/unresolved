@@ -2,6 +2,8 @@
 #define DNS_H
 
 #include <stdint.h>
+#include <sys/socket.h>
+#include "zoneloader.h"
 
 #define MASK_1BIT 0x01          // 0b00000001
 #define MASK_2BITS 0x03         // 0b00000011
@@ -10,6 +12,7 @@
 #define MASK_8BITS 0xFF         // 0b11111111
 
 #define DNS_MAX_RDATA 256
+#define MAX_PENDINGS 10
 
 /* Header 12 Bytes */
 typedef struct{
@@ -62,5 +65,28 @@ typedef struct{
     dns_query_t query;               // Question
     dns_rr_t ans;                   // Answer
 }dns_t;
+
+/* Zone Lookup */
+typedef struct{
+    record_t *answers[8];        // Addresses to Resource Records
+    size_t n_ans;
+
+    record_t *additional[8];      // Addresses to Additional Records
+    size_t n_add;
+
+    short authoritative;         // 0 for Authoritative Answer
+}zone_lookup_res_t;
+
+/* TXID Mappings */
+typedef struct{
+        int in_use;  // 0 for not using, 1 for using
+
+        uint16_t client_txid;
+        uint16_t upstream_txid;
+
+        struct sockaddr_in *client_addr;
+
+}pending_query_t;
+
 
 #endif

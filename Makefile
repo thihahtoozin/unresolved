@@ -6,7 +6,7 @@ CFLAGS = -Wall -Wextra -Iinclude
 TARGET = build/unresolved
 
 # Source Files
-SRC = src/main.c src/zoneloader.c src/handle_dns.c
+SRC = src/main.c src/zoneloader.c src/handle_dns.c src/globals.c
 ZONELOADER = src/zoneloader.c
 
 # Default rule

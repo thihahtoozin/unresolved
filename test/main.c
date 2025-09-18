@@ -10,6 +10,7 @@
 #include <sys/epoll.h>
 
 #define PORT 1337
+#define BUFFER_SIZE 256
 #define MAX_CONN 10
 #define MAX_EVENTS 10
 
@@ -20,8 +21,9 @@ int make_socket_nonblocking(int fd){
 }
 
 int main(void){
+    char buffer[BUFFER_SIZE];
     // socket
-    int serv_fd, cli_fd_tmp;
+    int serv_fd, cli_fd_tmp, nfds;
     struct sockaddr_in addr, cli_addr;
 
     serv_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -58,14 +60,48 @@ int main(void){
 
     socklen_t cli_addr_len = sizeof(cli_addr);
     for(;;){
-        cli_fd_tmp = accept(serv_fd, (struct sockaddr *) &cli_addr, &cli_addr_len); // like `read()`, `accept()` can also return EAGAIN.
-        if(cli_fd_tmp == -1 && errno == EAGAIN) continue;                           // continue the loop on EAGAIN
+        nfds = epoll_wait(epfd, ep_events, MAX_EVENTS, -1);
+        for(int i = 0; i < nfds; ++i){
+            if(ep_events[i].data.fd == serv_fd){
+                printf("servfd\n");
+                cli_fd_tmp = accept(serv_fd, (struct sockaddr *) &cli_addr, &cli_addr_len); // like `read()`, `accept()` can also return EAGAIN.
+                if(cli_fd_tmp == -1 && errno == EAGAIN) continue;                           // continue the loop on EAGAIN
 
-        char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &cli_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
-        printf("Client's addr : %s\n", client_ip);
-        printf("Client's port : %hu\n", ntohs(cli_addr.sin_port));
+                // Add client to epoll instance
+                tmp_event.events = EPOLLIN | EPOLLET;
+                tmp_event.data.fd = cli_fd_tmp;
+                epoll_ctl(epfd, EPOLL_CTL_ADD, cli_fd_tmp, &tmp_event);
 
+                // Make client socket non-blocking
+                make_socket_nonblocking(cli_fd_tmp);
+                
+                char client_ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &cli_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
+                printf("Client's addr : %s\n", client_ip);
+                printf("Client's port : %hu\n", ntohs(cli_addr.sin_port));
+
+            }else{
+                cli_fd_tmp = ep_events[i].data.fd;
+                // printf("client_fd : %d\n", cli_fd_tmp);
+                while(1){
+                    int n_read = read(cli_fd_tmp, buffer, BUFFER_SIZE);
+                    if(n_read == -1){
+                        if(errno == EAGAIN || errno == EWOULDBLOCK){
+                            printf("no more data for now\n");
+                            break; // no more data for now
+                        }else{
+                            exit(1);
+                            break;
+                        }
+                    }
+                    printf("n_read : %d\n", n_read);
+                    buffer[n_read] = '\0';
+                    printf("%s\n", buffer);
+                    fflush(stdout);
+                    break;
+                }
+            }
+        }
     }
 
     return 0;

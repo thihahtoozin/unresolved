@@ -9,6 +9,7 @@
 #include "dns.h"
 #include "client.h"
 #include "zoneloader.h"
+#include "globals.h"
 
 ssize_t encode_fqdn(const char *domain, void **addr){
     /* This function split the `www.example.com.` into
@@ -16,6 +17,13 @@ ssize_t encode_fqdn(const char *domain, void **addr){
      * (03 w w w 07 e x a m p l e 03 c o m 00)
      * write the results to the specified address and
      * return the amount of bytes written
+     *
+     * RETURN VALUE : the length (or the next index) of the
+     *                end of the encoded domain
+     * 03  w  w  w 07  e  x  a  m  p  l  e 03  c  o  m 00
+     * 03 77 77 77 07 65 78 61 6d 70 6c 65 03 63 6f 6d 00
+     *                                                    ^
+     *                                                   [17] <= ret value
      */
 
     uint8_t hold[256]; // Temporary memory to build up the result
@@ -51,29 +59,125 @@ ssize_t encode_fqdn(const char *domain, void **addr){
     return pos;
 }
 
-static void forward_query(const char *buffer, ssize_t bytes_recv, client_t *client, int serv_sock, int upstream_sock, struct sockaddr_in ext_serv_addr){
+int map_txid(client_t *client){
+        /* THIS FUNCTION IS FOR OUTBOUND REQUEST */
+        /* This function maps the client_txid with the
+         * generated txid that will be used to make the
+         * upstream DNS request
+         *
+         * RETURN VALUE: TXID used in upstream request
+         *               is returned. -1 is returned
+         *               when the txid tracking is full.
+         */
 
-    uint8_t upstream_rep_p[512]; // Upstream Request Packet
+        /* Extract client's TXID from the buffer (or from the client struct) */
+        uint16_t client_txid = client->req.header.trans_id;
 
-    struct sockaddr_in rep_addr;
-    socklen_t rep_addr_len = sizeof(rep_addr);
+        /* Adding a new pending query to the tracking list */
+        for(int i = 0; i < MAX_PENDINGS; i++){
+                if(pending_queries[i].in_use == 1) continue;
+                // Add to the list when we find the space to add
+                pending_queries[i].client_txid = client_txid;
+                pending_queries[i].upstream_txid = txid_counter++;
+                printf("pending_queries[i].upstream_txid : %d\n", pending_queries[i].upstream_txid);
+                pending_queries[i].client_addr = &client->addr;
+                pending_queries[i].in_use = 1;
 
-    // send request to the external DNS server
+                return pending_queries[i].upstream_txid;
+        }
+        return -1; // `pending_queries` tracking list is full
+}
+
+pending_query_t *find_txid(uint16_t upstream_txid){
+    /* Find client's TXID with the provided upstream TXID */
+    for(int i = 0; i < MAX_PENDINGS; i++){
+        if(pending_queries[i].in_use == 0) continue;
+        if(pending_queries[i].upstream_txid == upstream_txid){
+            return &pending_queries[i];
+        }
+    }
+    return NULL;
+}
+
+void free_txid(uint16_t upstream_txid){
+    /* Find and change the `in_use` value to zero */
+    pending_query_t *pending_q = find_txid(upstream_txid);
+    if(pending_q) pending_q->in_use = 0;
+}
+
+static ssize_t forward_upstream(const char *buffer, ssize_t bytes_recv, int upstream_sock, struct sockaddr_in ext_serv_addr, client_t *client){
+    /* The function creates the map for TXIDs and
+     * relays the client's request to the external server .
+     * This is only meant for upstream
+     */
+
+    uint8_t forward_pkt[512];
+
+    /* Copy the buffer to the custom packet crafting space (We are editing) */
+    memcpy(forward_pkt, buffer, bytes_recv);
+
+    /* Add client's TXID  to the tracking list and get new upstream TXID */
+    uint16_t upstream_txid = map_txid(client);
+    if(upstream_txid == -1){
+        fprintf(stderr, "Pending list is full\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* Inside the buffer, replace the client's TXID with the new upstream TXID */
+    forward_pkt[0] = (upstream_txid >> 8) & MASK_8BITS;
+    forward_pkt[1] = upstream_txid & MASK_8BITS;
+
+    /* Send request to the external DNS server */
     socklen_t ext_addr_len = sizeof(ext_serv_addr);
-    sendto(upstream_sock, buffer, bytes_recv, 0, (struct sockaddr *) &ext_serv_addr, ext_addr_len);
+    return sendto(upstream_sock, forward_pkt, bytes_recv, 0, (struct sockaddr *) &ext_serv_addr, ext_addr_len);
+}
 
-    // receive the response from the external server
+ssize_t forward_downstream(int serv_sock, int upstream_sock){
+    printf("Sending Downstream\n");
+    /* Called by main epoll */
+    uint8_t upstream_rep_p[512];                // Upstream Response Packet
+    struct sockaddr_in rep_addr;                // External server address
+    socklen_t rep_addr_len = sizeof(rep_addr);  //
+
     ssize_t ret_bytes = recvfrom(upstream_sock, upstream_rep_p, sizeof(upstream_rep_p), 0, (struct sockaddr *) &rep_addr, &rep_addr_len);
 
-    // relay the response back to the client
-    socklen_t cli_addr_len = sizeof(client->addr);
-    sendto(serv_sock, upstream_rep_p, ret_bytes, 0, (struct sockaddr *) &client->addr, cli_addr_len);
+    /* Extract TXID */
+    uint16_t upstream_txid = ((unsigned char) upstream_rep_p[0] << 8) | (unsigned char) upstream_rep_p[1];
+
+    /* TXID Looking up and mapping the right client to get `client` */
+    pending_query_t *pending_q = find_txid(upstream_txid);
+    uint16_t client_txid;
+    if(pending_q != NULL){
+        client_txid = pending_q->client_txid;
+        printf("client_txid : %d\n", client_txid);
+    }else{
+        printf("pending_q is NULL\n");
+    }
+
+    upstream_rep_p[0] = (client_txid >> 8) & MASK_8BITS;
+    upstream_rep_p[1] = client_txid & MASK_8BITS;
+
+    if(pending_q) pending_q->in_use = 0; // free TXID
+    // free_txid(upstream_txid);
+
+    // Relay the response back to the client
+    socklen_t cli_addr_len = sizeof(struct sockaddr_in);
+    ssize_t b_sent = sendto(serv_sock, upstream_rep_p, ret_bytes, 0, (struct sockaddr *) pending_q->client_addr, cli_addr_len);
+    printf("Bytes send downstream : %ld\n", b_sent);
+    return b_sent;
 }
 
 int parse_question(const char *buffer, int offset, dns_query_t *query){
+    /*
+     * This function gets the question domain from the question section
+     * and fills in the dns_query_t *query
+     */
+
     int pos = offset;
     unsigned int question_len = 0;
     unsigned int query_i = 0;
+
+    /* Decode the question to the domain in constrast of `encode_fqdn` */
     while(buffer[pos] != '\0'){
         int label_len = (unsigned char) buffer[pos++];
         if(label_len == 0) break;
@@ -101,14 +205,16 @@ int parse_question(const char *buffer, int offset, dns_query_t *query){
 }
 
 void read_request(const char *buffer, client_t *client){
+    /*
+     * Extract the data(Header & Question sections) from the client's
+     * request and build the client's structure for tracking
+     */
 
-    /* Extract data from the client's request */
-
-    /* Extract Header */
     dns_t *req = &client->req;
     dns_header_t *header = &req->header;
     dns_query_t *query = &req->query;
 
+    /* Extract Header */
     header->trans_id = ((unsigned char) buffer[0] << 8) | (unsigned char) buffer[1];
     // printf("header->trans_id : %d\n", header->trans_id);
     // printf("buffer[0] : %d\n", buffer[0]);
@@ -135,7 +241,7 @@ void read_request(const char *buffer, client_t *client){
 }
 
 /* These funcitons return the amount of bytes written */
-static int write_header(uint8_t *rep_p, dns_t *req, uint16_t an_count, uint16_t ns_count, uint16_t ar_count){
+static int write_header(uint8_t *rep_p, const dns_t *req, const zone_lookup_res_t *res){
 
     /* Response Header Section */
     dns_header_t rep_header = {0};
@@ -146,16 +252,16 @@ static int write_header(uint8_t *rep_p, dns_t *req, uint16_t an_count, uint16_t 
     rep_header.flags = 0;                             // Flags (these will eventually store in memory in little endian anyway)
     rep_header.flags |= (1 << 15);                    // QR = 1 for response
     rep_header.flags |= (req_opcode << 11);           // OPCODE = copy from client (0 for standard query)
-    rep_header.flags |= (1 << 10);                    // AA = 1 for Authoritative Answer
+    rep_header.flags |= (res->authoritative << 10);   // AA (Authoritative Answer)
     rep_header.flags |= (0 << 9);                     // TC = 0 (Not truncated)
     rep_header.flags |= (req_rd << 8);                // RD = copy from client
     rep_header.flags |= (0 << 7);                     // RA = 0 (Recursion is not available for now but later)
     rep_header.flags |= (0);                          // RCODE = 0 (No error)
     // Counts
     rep_header.qd_count = req->header.qd_count;
-    rep_header.an_count = an_count;                   // INITIALIZED TO ZERO
-    rep_header.ns_count = ns_count;                   // INITIALIZED TO ZERO
-    rep_header.ar_count = ar_count;                   // INITIALIZED TO ZERO
+    rep_header.an_count = res->n_ans;
+    rep_header.ns_count = 0;
+    rep_header.ar_count = res->n_add;
 
     /* Write header to the response packet */
     int header_len = 0;
@@ -176,7 +282,7 @@ static int write_header(uint8_t *rep_p, dns_t *req, uint16_t an_count, uint16_t 
     return header_len; // 12 bytes
 };
 
-static int write_question(uint8_t *rep_p, const char *buffer, dns_query_t *query, int q_offset){
+static int write_question(const char *buffer, dns_query_t *query, int q_offset, uint8_t *rep_p){
 
     // int q_offset = *rep_len;                  // 12
     size_t q_pos = q_offset;
@@ -197,9 +303,8 @@ static int write_question(uint8_t *rep_p, const char *buffer, dns_query_t *query
     return q_pos;
 }
 
-static int write_answer(uint8_t *rep_p, dns_rr_t *ans, dns_rr_t *add_ans, int q_offset, int ans_offset, ssize_t encoded_domain_len){
+static int write_answer(dns_rr_t *ans, dns_rr_t *add_ans, int ans_offset, uint8_t *rep_p){
     size_t pos = ans_offset;
-    ans->name_ptr = (3 << 14) | q_offset;        // 0xc00c; if the q_offset is 12
 
     // printf("%d\n", ans->name_ptr);
     rep_p[pos++] = (ans->name_ptr >> 8) & MASK_8BITS;    // Name           [MSB]
@@ -219,23 +324,33 @@ static int write_answer(uint8_t *rep_p, dns_rr_t *ans, dns_rr_t *add_ans, int q_
         /* A */
         printf("A 0x1\n");
         inet_pton(AF_INET, ans->rdata, rep_p+pos);
-        pos += 4;       // 32 bit IPv4 address
+        pos += ans->rdlength;       // 32 bit IPv4 address (can manually set to 4)
     }else if(ans->type == 2){
         /* NS */
         printf("NS 0x2\n");
-        memcpy(rep_p+pos, ans->rdata, encoded_domain_len);
-        pos += encoded_domain_len - 1; // -1 for removing one of the 2 null bytes
+        memcpy(rep_p+pos, ans->rdata, ans->rdlength);
+        pos += ans->rdlength;
     }else if(ans->type == 5){
         /* CNAME */
         printf("CNAME 0x5\n");
-        memcpy(rep_p+pos, ans->rdata, encoded_domain_len);
-        // pos += encoded_domain_len - 1; // -1 for removing one of the 2 null bytes
-        pos += ans->rdlength; // -1 for removing one of the 2 null bytes
+
+        memcpy(rep_p+pos, ans->rdata, ans->rdlength);
+        pos += ans->rdlength;
+
+        int x = pos - ans_offset;
+        printf("x : %d\n", x);
+        add_ans->name_ptr = (3 << 14) | x;                       // NAME offset for CNAME Additional Record
 
         /* A as Additional */
         printf("Additional A 0x1\n");
-        memcpy(rep_p + pos, ans->rdata, ans->rdlength);
-        pos += ans->rdlength;
+        // memcpy(rep_p + pos, ans->rdata, ans->rdlength);       // We are literally copying the value of CNAME record again where it should be the pointer to the above CNAME answer (This part will be touched later)
+        //                                                       // (pos >> 8) & MASK_8BITS;
+        //                                                       // pos & MASK_8BITS
+        // pos += ans->rdlength;
+
+        rep_p[pos++] = (add_ans->name_ptr >> 8) & MASK_8BITS;    // Name           [MSB]
+        rep_p[pos++] = add_ans->name_ptr & MASK_8BITS;           //                [LSB]
+
         rep_p[pos++] = (add_ans->type >> 8) & MASK_8BITS;        // Type           [MSB]
         rep_p[pos++] = add_ans->type & MASK_8BITS;               //                [LSB]
         rep_p[pos++] = (add_ans->class_ >> 8) & MASK_8BITS;      // Class          [MSB]
@@ -248,157 +363,154 @@ static int write_answer(uint8_t *rep_p, dns_rr_t *ans, dns_rr_t *add_ans, int q_
         rep_p[pos++] = add_ans->rdlength & MASK_8BITS;           //                [LSB]
 
         inet_pton(AF_INET, add_ans->rdata, rep_p+pos);
-        pos += 4;       // 32 bit IPv4 address
+        pos += add_ans->rdlength;       // 32 bit IPv4 address
 
     }
-    // *rep_len = pos;
+
     return pos;
 }
 
-static int find_match(const char *buffer, dns_t *req, zone_t zone, uint8_t *rep_p, int *rep_len){
+int lookup_zone(dns_query_t *query, const zone_t *zone, zone_lookup_res_t *res){
+    /* This function find the match in the zone file and
+     * decide wheter to relay the request to the external
+     * resolver.
+     * If the requested domain is not the NXDOMAIN, the 
+     * function will update the `res` with the
+     * right `record_t` address.
+     *
+     * RETURN VALUE : The number of answers found
+     */
 
-    /* Answer Section */
+    memset(res, 0, sizeof(zone_lookup_res_t));
+
+    /* Look through the records in the zone structure and find the matching record with the question */
+    for(size_t i = 0; i < zone->n_records; ++i){
+        record_t *record = &zone->records[i];
+        printf("before skip\n");
+        printf("%s\t", query->question);
+        printf("%s\n", record->name);
+        if (strncmp(query->question, record->name, strlen(record->name)-1) != 0) continue;
+        /* Domain in the question is found in one of the records inside the zone struct */
+        res->answers[res->n_ans++] = record;
+
+        /* Additional Record in the case of CNAME */
+        if(strcmp(record->type,"CNAME") == 0){
+            /* Look through the records again to find the matching A record name with the CNAME Record value */
+            for(size_t j = 0; j < zone->n_records && res->n_add < 8; ++j){
+                if(strcmp(zone->records[j].type, "A") == 0 && strcmp(zone->records[j].name, record->value) == 0){
+                    /* The matched record found */
+                    res->additional[res->n_add++] = &zone->records[j];
+                }
+            }
+        }
+
+        /* Authoritative Answer */
+        if(strstr(zone->origin, query->question) != NULL) res->authoritative = 1;
+
+    }
+
+    return res->n_ans > 0 ? 1 : 0;
+}
+
+int write_dns_response(const char *buffer, const dns_t *req, zone_lookup_res_t *res, uint8_t *rep_p){
+    /*
+     * This function constracts a DNS packet depending on the client's
+     * request and the result of the DNS lookup and writes it to the
+     * provided buffer.
+     *
+     * RETURN VALUE: the written length in bytes of the reponse in the
+     *               address space.
+     *
+     */
+
+    int rep_len;
     dns_rr_t *ans = malloc(sizeof(dns_rr_t));         // Answer RR
     dns_rr_t *add_ans = malloc(sizeof(dns_rr_t));     // Additional RR
 
-    ans->ttl = zone.ttl;                              // Time To Live in seconds for AN
-    add_ans->ttl = zone.ttl;                          // Time To Live in seconds for AR
-    dns_query_t *query = &req->query;
-
-    /* Find Match */
-    const char *query_t_str;
-    ssize_t encoded_domain_len = 0;
-    switch(query->qtype){
-        case 1:
-            query_t_str = "A";
-            break;
-        case 2:
-            query_t_str = "NS";
-            break;
-        case 5:
-            query_t_str = "CNAME";
-            break;
-        default:
-            query_t_str = "UNKNOWN";
-            break;
-    }
-    printf("QUERY_T_STR : %s\n", query_t_str);
-
-    uint16_t an_count = 0;
-    uint16_t ns_count = 0;
-    uint16_t ar_count = 0;
-
-    // Loop through records in zone_t
-    int rec_found = 0;
-    for(int i = 0; i < zone.n_records; i++){
-        // Find the matched question with the matched type
-        // if((strncmp(zone.records[i].name, query->question, strlen(query->question)) == 0) && (strcmp(zone.records[i].type, query_t_str) == 0))
-        if((strncmp(zone.records[i].name, query->question, strlen(query->question)) == 0)){ 
-            // printf("[ Record Found ]\t %s %s\n", query->question, query_t_str);
-            an_count++;
-
-            // AAAA (TYPE - 28)
-            // A Record
-            if(strncmp(zone.records[i].type, "A", 1) == 0){
-                printf("A Record\n");
-                ans->type = 1;                                 // A
-                ans->class_ = 1;                               // IN
-                ans->rdlength = 0x04;                          // IPv4 addresses takes only 4 bytes
-                strcpy(ans->rdata, zone.records[i].value);
-
-                rec_found = 1;
-                break;
-            }
-
-            // NS Record
-            if(strncmp(zone.records[i].type, "NS", 2) == 0){
-                printf("NS Record\n");
-
-                /* Header */
-                //rep_header.ns_count++;                       // I'm still uncertain about when to turn this on.
-
-                /* Answer */
-                ans->type = 2;                                 // NS
-                ans->class_ = 1;                               // IN
-
-                void *addr = NULL;                                                               // Address of the encoded bytes
-                encoded_domain_len = encode_fqdn(zone.records[i].value, &addr);                  // Encode domain into [count][label]...
-                memcpy(ans->rdata, addr, encoded_domain_len);
-                free(addr);
-                ans->rdlength = encoded_domain_len-1;
-
-                rec_found = 1;
-                break;
-            }
-
-            // CNAME Record
-            if(strncmp(zone.records[i].type, "CNAME", 5) == 0){
-                printf("CNAME Record\n");
-
-                /* Header */
-                ar_count++;                                    // Append one A record as Additional RR
-                //ns_count++;                                  // I'm still uncertain about when to turn this on.
-
-                /* Answer */
-                ans->type = 5;                                 // CNAME
-                ans->class_ = 1;                               // IN
-
-                void *addr = NULL;                                                               // Address of the encoded bytes
-                encoded_domain_len = encode_fqdn(zone.records[i].value, &addr);                  // Encode domain into [count][label]...
-                memcpy(ans->rdata, addr, encoded_domain_len);
-                free(addr);
-                ans->rdlength = encoded_domain_len-1;
-
-                /* Additional RR for A Record */
-                // dns_rr_t *add_ans = malloc(sizeof(dns_rr_t));
-                printf("Additional A Record\n");
-                add_ans->type = 1;                                 // A
-                add_ans->class_ = 1;                               // IN
-                add_ans->rdlength = 0x04;                          // IPv4 addresses takes only 4 bytes
-
-                // Search of A records
-                for(int j = 0; j < zone.n_records; j++){
-                    if(strncmp(zone.records[j].type, "A", 1) == 0){
-                        printf("------------------\n");
-                        printf("IP ADDR : %s\n", zone.records[j].value);
-                        strcpy(add_ans->rdata, zone.records[j].value);
-                        printf("ADD AND : %s\n", add_ans->rdata);
-                        break;
-                    }
-                }
-
-                rec_found = 1;
-                break;
-            }
-            // SOA  (TYPE - 6)
-            // PTR  (TYPE - 12)
-
-        } 
-    }
-    if(rec_found == 0) return -1;
+    memset(ans, 0, sizeof(dns_rr_t));
+    memset(add_ans, 0, sizeof(dns_rr_t));
 
     /* Write the Header Section */
-    int header_len = write_header(rep_p, req, an_count, ns_count, ar_count);
-    *rep_len = header_len;
-
-    /* 
-     * for any case where there is anything between header and question
-     */
-
+    int header_len = write_header(rep_p, req, res);
+    rep_len = header_len;
+    
     /* Write the Question Section */
-    int q_offset = *rep_len;   // 12
-    *rep_len = write_question(rep_p, buffer, query, q_offset);
+    int q_offset = rep_len;   // 12
+    dns_query_t *query = &req->query;
+    rep_len = write_question(buffer, query, q_offset, rep_p);
 
     /* Write the Answer Section */
-    *rep_len = write_answer(rep_p, ans, add_ans, q_offset, *rep_len, encoded_domain_len);
+    for(size_t i = 0; i < res->n_ans; ++i){
+        record_t *record = res->answers[i];
+        printf("record->name : %s\n", record->name);
+        printf("record->type : %s\n", record->type);
+        if(strcmp(record->type, "A") == 0){
+            ans->name_ptr = (3 << 14) | q_offset;     // 0xc00c; if the q_offset is 12
+
+            ans->type = 1;                            // A
+            ans->class_ = 1;                          // IN
+            ans->ttl = 3600;                          // zone.ttl;
+
+            ans->rdlength = 0x04;                     // IPv4 addresses takes only 4 bytes
+            strcpy(ans->rdata, record->value);
+
+            break; 
+        }
+        if(strcmp(record->type, "NS") == 0){
+            printf("NS assigning ans\n");
+            ans->name_ptr = (3 << 14) | q_offset;     // 0xc00c; if the q_offset is 12
+
+            ans->type = 2;                            // NS
+            ans->class_ = 1;                          // IN
+            ans->ttl = 3600;                          // zone.ttl;
+
+            void *addr = NULL;                                                  // Address of the encoded bytes
+            ans->rdlength = encode_fqdn(record->value, &addr);                  // Encode domain into [count][label]...
+            memcpy(ans->rdata, addr, ans->rdlength);
+            free(addr);
+
+            //ans->rdlength = encode_fqdn(record->value, (void *) ans->rdata);                       // Encode domain into [count][label]...
+
+            break;
+        }
+        if(strcmp(record->type, "CNAME") == 0){
+            ans->name_ptr = (3 << 14) | q_offset;     // 0xc00c; if the q_offset is 12
+
+            ans->type = 5;                            // CNAME
+            ans->class_ = 1;                          // IN
+            ans->ttl = 3600;                          // zone.ttl;
+ 
+            void *addr = NULL;                                                  // Address of the encoded bytes
+            ans->rdlength = encode_fqdn(record->value, &addr);                  // Encode domain into [count][label]...
+            memcpy(ans->rdata, addr, ans->rdlength);
+            free(addr);
+
+            //ans->rdlength = encode_fqdn(record->value, (void *) ans->rdata);                       // Encode domain into [count][label]...
+
+            /* Additional A Record */
+            add_ans->type = 1;                        // A
+            add_ans->class_ = 1;                      // IN
+            add_ans->rdlength = 0x04;                 // IPv4 addresses takes only 4 bytes
+            strcpy(add_ans->rdata,res->additional[0]->value);
+
+            // `add_ans->name_ptr` will be populated in write_answer() for the case of additional record
+
+            break;
+        }
+
+        rep_len = write_answer(ans, add_ans, rep_len, rep_p);
+    }
 
     /* Free Memories */
     free(ans);
     free(add_ans);
-    return 0;
+
+    return rep_len;
 }
 
-void write_response(const char *buffer, ssize_t bytes_recv, int serv_sock, int upstream_sock, client_t *client, zone_t zone, socklen_t addr_len, struct sockaddr_in ext_serv_addr){
+// void write_response(const char *buffer, ssize_t bytes_recv, int serv_sock, int upstream_sock, client_t *client, zone_t zone, socklen_t addr_len, struct sockaddr_in ext_serv_addr)
+void handle_dns(const char *buffer, ssize_t bytes_recv, int serv_sock, int upstream_sock, client_t *client, zone_t *zone_addr, socklen_t addr_len, struct sockaddr_in ext_serv_addr){
+    /* The Orchestrator Function */
 
     uint8_t rep_p[512];          // Response Packet
     uint8_t upstream_req_p[512]; // Upstream Request Packet
@@ -406,12 +518,26 @@ void write_response(const char *buffer, ssize_t bytes_recv, int serv_sock, int u
     int found;
 
     dns_t *req = &client->req; 
-    found = find_match(buffer, req, zone, rep_p, &rep_len);
+    zone_lookup_res_t res;
+    //int lookup_zone(dns_query_t *query, const zone_t *zone, zone_lookup_res_t *res){
 
-    if(found == -1){
-        forward_query(buffer, bytes_recv, client, serv_sock, upstream_sock, ext_serv_addr);
-    }else{
+    printf("before lookup\n");
+    int n_ans = lookup_zone(&req->query, zone_addr, &res);
+    printf("after lookup\n");
+    //found = find_match(buffer, req, zone, rep_p, &rep_len);
+
+    if(n_ans > 0){
+        printf("FOUND\n");
+        //int write_dns_response(const char *buffer, const dns_t *req, zone_lookup_res_t *res, uint8_t *rep_p){
+        rep_len = write_dns_response(buffer, req, &res, rep_p);
+        printf("Response Crafted\n");
         sendto(serv_sock, rep_p, rep_len, 0, (struct sockaddr *) &client->addr, addr_len);
+        printf("Response Sent\n");
+    }else{
+        printf("NOT FOUND\tFORWARDING\n");
+        //forward_query(buffer, bytes_recv, client, serv_sock, upstream_sock, ext_serv_addr);
+        forward_upstream(buffer, bytes_recv, upstream_sock, ext_serv_addr, client);
     }
 }
+
 

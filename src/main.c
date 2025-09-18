@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <string.h>
 #include <arpa/inet.h>
+#include <sys/epoll.h>
 
 #include "client.h"
 #include "dns.h"
@@ -11,6 +13,13 @@
 #include "handle_dns.h"
 
 #define BUFFER_SIZE 1232
+#define MAX_EVENTS 64
+
+int make_socket_nonblocking(int fd){
+    int flags = fcntl(fd, F_GETFL, 0);
+    if(flags == -1) return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
 
 int main(int argc, char **argv){
     // Resolving arguments
@@ -37,6 +46,13 @@ int main(int argc, char **argv){
         exit(EXIT_FAILURE);
     }
  
+    // Creating the socket of making upstream request
+    int upstream_sock = socket(AF_INET, SOCK_DGRAM, 0);
+
+    make_socket_nonblocking(serv_sock);
+    make_socket_nonblocking(upstream_sock);
+
+    /* ADDRESS STRUCTURE */
     // Create the Address Structure for server
     struct sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));
@@ -49,9 +65,6 @@ int main(int argc, char **argv){
         exit(EXIT_FAILURE);
     }
 
-    // Creating the socket of making upstream request
-    int upstream_sock = socket(AF_INET, SOCK_DGRAM, 0);
-
     // Create the Address Structure for external server
     struct sockaddr_in ext_serv_addr;
     memset(&ext_serv_addr, 0, sizeof(ext_serv_addr));
@@ -59,6 +72,17 @@ int main(int argc, char **argv){
     ext_serv_addr.sin_port = htons(ext_serv_port);
     inet_pton(AF_INET, ext_serv_ip, &ext_serv_addr.sin_addr);
 
+    /* EPOLL */
+    struct epoll_event tmp_ev, ep_events[MAX_EVENTS];
+    int epfd = epoll_create1(0);
+    tmp_ev.events = EPOLLIN;
+    tmp_ev.data.fd = serv_sock;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, serv_sock, &tmp_ev);
+
+    tmp_ev.data.fd = upstream_sock;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, upstream_sock, &tmp_ev);
+
+    /* ZONE FILE */
     // Load zone file
     zone_t zone;
     parse_zone_file("config/zones/segfault.local.zone", &zone);
@@ -83,12 +107,38 @@ int main(int argc, char **argv){
         printf("%s\t%s\t%s\t%s\n", zone.records[i].name, zone.records[i].rec_class, zone.records[i].type, zone.records[i].value);
     }
 
-    while(1){
+    /* MAIN LOOP */
+    for(;;){
         char buffer[BUFFER_SIZE];
         client_t client;
+        int nfds = epoll_wait(epfd, ep_events, MAX_EVENTS, -1);
 
+        for(int i = 0; i < nfds; i++){
+            int fd = ep_events[i].data.fd;
+            if(fd == serv_sock){
+                socklen_t addr_len = sizeof(client.addr);
+                ssize_t bytes_recv = recvfrom(serv_sock, buffer, sizeof(buffer), 0, (struct sockaddr *) &client.addr, &addr_len);
+                if(bytes_recv < 0){
+                    perror("recvfrom()");
+                    close(serv_sock);
+                    exit(EXIT_FAILURE);
+                }
+                read_request(buffer, &client);
+                handle_dns(buffer, bytes_recv, serv_sock, upstream_sock, &client, &zone, addr_len, ext_serv_addr);
+            }else if(fd == upstream_sock){
+                printf("upstream_sock get notified!\n");
+                /* Handle downstream response */
+                //ssize_t forward_downstream(int serv_sock, int upstream_sock);
+                forward_downstream(serv_sock, upstream_sock);
+
+            }else{
+                continue;
+            }
+        }
+
+        /*
         socklen_t addr_len = sizeof(client.addr);
-        ssize_t bytes_recv = recvfrom(serv_sock, buffer, sizeof(buffer), 0, (struct sockaddr *) &client.addr, &addr_len); // <= START HERE
+        ssize_t bytes_recv = recvfrom(serv_sock, buffer, sizeof(buffer), 0, (struct sockaddr *) &client.addr, &addr_len);
         if(bytes_recv < 0){
             perror("recvfrom()");
             close(serv_sock);
@@ -97,6 +147,7 @@ int main(int argc, char **argv){
 
         read_request(buffer, &client);
         write_response(buffer, bytes_recv, serv_sock, upstream_sock, &client, zone, addr_len, ext_serv_addr);
+        */
     }
 
     close(serv_sock);
