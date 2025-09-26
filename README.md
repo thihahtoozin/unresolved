@@ -76,9 +76,9 @@ Here you can also change the address of external DNS resolver.
 
 > Note : After editing the zone file, restart the program to apply changes.
 
-### System DNS Client Setup
+## System DNS Client Setup
 
-#### Linux `systemd-resolved`
+### Linux `systemd-resolved`
 Tell `systemd-resolved` to use the local DNS server for all queries.
 ```
 sudo resolvectl dns wlan0 127.0.0.1
@@ -92,7 +92,7 @@ Flush the caches.
 sudo resolvectl flush-caches
 ```
 
-#### Windows
+### Windows
 1. Go to Control Panel → Network and Sharing Center → Change adapter settings.
 2. Right click your network → Properties.
 3. Select Internet Protocol Version 4 (TCP/IPv4) → Properties.
@@ -117,3 +117,28 @@ Query external domains:
 dig @127.0.0.1 -p 5353 www.archlinux.org
 dig @127.0.0.1 -p 5353 www.raspberrypi.com
 ```
+
+
+
+## Uninstallation
+To remove **Unresolved** from your system, follow these steps:
+
+### Linux
+Terminate the server
+```
+pkill unresolved
+```
+
+Restore DNS settings (you do not need if you didn't follow the **System DNS Client Setup** section)
+```
+resolvectl revert wlan0
+resolvectl flush-caches
+sudo systemctl restart systemd-resolved
+```
+
+### Windows
+1. Go to Control Panel → Network and Sharing Center → Change adapter settings.
+2. Right-click your network → Properties.
+3. Select Internet Protocol Version 4 (TCP/IPv4) → Properties.
+4. Set “Obtain DNS server address automatically”.
+
