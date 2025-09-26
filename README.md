@@ -64,7 +64,7 @@ www IN  CNAME   segfault.home.   ; www is an alias of the root domain
 
 ```
 
-Modify the IP address and the domain name to you needs or you can copy the file contents, pate them to your desired file location edit the address information.
+Modify the IP address and the domain name to your needs, or you can copy the file contents and paste them to your desired file location, then edit the address information.
 Then you change the path in the `include/config.h` file.
 
 ```c
@@ -118,8 +118,6 @@ dig @127.0.0.1 -p 5353 www.archlinux.org
 dig @127.0.0.1 -p 5353 www.raspberrypi.com
 ```
 
-
-
 ## Uninstallation
 To remove **Unresolved** from your system, follow these steps:
 
@@ -131,8 +129,8 @@ pkill unresolved
 
 Restore DNS settings (you do not need if you didn't follow the **System DNS Client Setup** section)
 ```
-resolvectl revert wlan0
-resolvectl flush-caches
+sudo resolvectl revert wlan0              # replace wlan0 with your network interface
+sudo resolvectl flush-caches
 sudo systemctl restart systemd-resolved
 ```
 
