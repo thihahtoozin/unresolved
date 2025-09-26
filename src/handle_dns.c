@@ -181,6 +181,7 @@ int parse_question(const char *buffer, int offset, dns_query_t *query){
         if(label_len == 0) break;
 
         question_len += label_len;
+        if(query_i + label_len + 1 >= sizeof(query->question)) break; // Prevent overflow
         for(int i = 0; i < label_len; i++){
             query->question[query_i++] = buffer[pos++];
         }
