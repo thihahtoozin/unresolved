@@ -102,30 +102,4 @@ int parse_zone_file(const char *filepath, zone_t *zone){
     fclose(fp);
     return 0;
 }
-/* Uncomment the line below to test zoneloader file alone */
-/*
-int main(void){
-    zone_t zone;
-    parse_zone_file("config/zones/segfault.local.zone", &zone);
 
-    printf("zone.ttl\t%u\n", zone.ttl);
-    printf("zone.origin\t%s\n", zone.origin);
-
-    // Display SOA
-    printf("SOA Rrecord\n");
-    printf("MNAME   : %s\n", zone.soa.mname);
-    printf("RNAME   : %s\n", zone.soa.rname); 
-    printf("Serial  : %u\n", zone.soa.serial);
-    printf("Refresh : %u\n", zone.soa.refresh);
-    printf("Retry   : %u\n", zone.soa.retry);
-    printf("Expire  : %u\n", zone.soa.expire);
-    printf("Min TTL : %u\n", zone.soa.min_ttl);
-
-    // Display records
-    printf("Records\n");
-    for(size_t i = 0; i < zone.n_records; i++){
-        printf("%s\t%s\t%s\t%s\n", zone.records[i].name, zone.records[i].rec_class, zone.records[i].type, zone.records[i].value);
-    }
-    return 0;
-}
-*/

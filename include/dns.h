@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+
 #include "zoneloader.h"
 
 #define MASK_1BIT 0x01          // 0b00000001
@@ -68,25 +70,25 @@ typedef struct{
 
 /* Zone Lookup */
 typedef struct{
-    record_t *answers[8];        // Addresses to Resource Records
+    const record_t *answers[8];         // Addresses to Resource Records
     size_t n_ans;
 
-    record_t *additional[8];      // Addresses to Additional Records
+    const record_t *additional[8];      // Addresses to Additional Records
     size_t n_add;
 
     short authoritative;         // 0 for Authoritative Answer
 }zone_lookup_res_t;
 
-/* TXID Mappings */
+/* Pending Client */
 typedef struct{
-        int in_use;  // 0 for not using, 1 for using
+        int in_use;         // 0 for not using, 1 for using
 
+        /* TXID Mapping */
         uint16_t client_txid;
         uint16_t upstream_txid;
 
-        struct sockaddr_in *client_addr;
+        struct sockaddr_in client_addr;
 
 }pending_query_t;
-
 
 #endif
