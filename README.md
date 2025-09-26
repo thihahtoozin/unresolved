@@ -74,7 +74,7 @@ Then you change the path in the `include/config.h` file.
 ```
 Here you can also change the address of external DNS resolver.
 
-After editing the zone file, restart the program to apply changes.
+> Note : After editing the zone file, restart the program to apply changes.
 
 ## Examples Queries
 
