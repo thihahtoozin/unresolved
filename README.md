@@ -1,4 +1,5 @@
 # Unresolved
+*A lightweight DNS resolver written in C*
 
 ## Description
 **Unresolved** is a lightweight DNS resolver written in C. It  resolves local domains defined in the zone file and forwards unknown queries to an external resolver.
@@ -71,6 +72,26 @@ Then you change the path in the `include/config.h` file.
 #define EXT_SERV "8.8.8.8"                              // Edit this line for changing external server IP
 #define EXT_SERV_PORT 53                                // Edit this line for changing external server PORT 
 ```
+Here you can also change the address of external DNS resolver.
 
 After editing the zone file, restart the program to apply changes.
 
+## Examples Queries
+
+Start the server
+```bash
+./build/unresolved 127.0.0.1 5353
+```
+
+Query local domains:
+```bash
+dig @127.0.0.1 -p 5353 segfault.local
+dig @127.0.0.1 -p 5353 segfault.local NS
+dig @127.0.0.1 -p 5353 www.segfault.local
+```
+
+Query external domains:
+```bash
+dig @127.0.0.1 -p 5353 www.archlinux.org
+dig @127.0.0.1 -p 5353 www.raspberrypi.com
+```
